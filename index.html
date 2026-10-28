@@ -602,22 +602,36 @@
       const k = getKey() || $('key').value.trim();
       const st = $('kst');
       if (!k) { st.textContent = '❌ الرجاء إدخال المفتاح أولاً.'; return; }
-      st.textContent = '⏳ جاري فحص المفتاح مع Google Gemini...';
-      try {
-        const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=' + k, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: 'قل كلمة: نجاح' }] }] })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          const detail = (data.error && data.error.message) || res.statusText || ('كود الخطأ: ' + res.status);
-          st.textContent = '❌ فشل الفحص: ' + detail;
-        } else {
-          st.textContent = '✅ الاتصال ناجح ومفتاح Gemini يعمل بكفاءة!';
+      st.textContent = '⏳ جاري فحص النماذج المتاحة لمفتاحك...';
+
+      const candidateModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+      let workingModel = null;
+      let lastErrMsg = '';
+
+      for (const m of candidateModels) {
+        try {
+          const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent?key=' + k, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: 'قل كلمة: نجاح' }] }] })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) {
+            workingModel = m;
+            break;
+          } else {
+            lastErrMsg = (data.error && data.error.message) || res.statusText || ('كود الخطأ: ' + res.status);
+          }
+        } catch (err) {
+          lastErrMsg = 'خطأ اتصال: ' + (err.message || err);
+          break;
         }
-      } catch (err) {
-        st.textContent = '❌ فشل الاتصال بالشبكة (Network / CORS): ' + (err.message || err);
+      }
+
+      if (workingModel) {
+        st.textContent = '✅ الاتصال ناجح ومفتاحك يعمل مع النموذج: (' + workingModel + ') بنجاح!';
+      } else {
+        st.textContent = '❌ فشل الفحص: ' + lastErrMsg;
       }
     };
     async function askAI(key, desc, note) {
@@ -629,65 +643,67 @@
 أعد JSON فقط، بلا أي نص آخر وبلا علامات تنسيق، بهذا الهيكل بالضبط:
 {"classification":{"emotion":"","type":"أساسي أو مركب","intensity":"","opposite":""},"signal_decoded":"","facts_vs_assumptions":{"facts":[],"assumptions":[]},"action_plan":["","",""]}
 القواعد: عربية فصحى مبسطة ودافئة. type إما "أساسي" وإما "مركب" (إذا اخترت شعورين فاذكر اسم المركّب الناتج إن وُجد). intensity من درجات الشدة في العجلة. opposite هو الشعور المقابل. signal_decoded فقرة قصيرة عمّا يحاول الشعور التنبيه إليه. الحقائق: ما يمكن ملاحظته أو إثباته من النص فقط. الافتراضات: التفسيرات والتوقعات غير المؤكدة. action_plan: ثلاث خطوات صغيرة قابلة للتنفيذ اليوم. لست معالجاً نفسياً؛ وإن ظهر في النص خطر على حياة الكاتب فاجعل الخطوة الأولى طلب مساعدة عاجلة من شخص موثوق أو جهة مختصة.`;
-      let resp;
-      try {
-        const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=' + key;
-        resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.4,
-              maxOutputTokens: 1500,
-              responseMimeType: "application/json"
+
+      // Candidate models in priority order
+      const models = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+      let lastErr = null;
+
+      for (const m of models) {
+        try {
+          const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + m + ':generateContent?key=' + key;
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.4,
+                maxOutputTokens: 1500,
+                responseMimeType: "application/json"
+              }
+            })
+          });
+
+          if (resp.status === 401 || resp.status === 403) {
+            const errBody = await resp.json().catch(() => ({}));
+            throw { code: 'bad_key', detail: (errBody.error && errBody.error.message) || resp.statusText };
+          }
+          if (resp.status === 429) throw { code: 'rate_limited' };
+
+          if (!resp.ok) {
+            const errBody = await resp.json().catch(() => ({}));
+            const errMsg = (errBody && errBody.error && errBody.error.message) || resp.statusText;
+            // If model not found or deprecated (404), try next model
+            if (resp.status === 404 || errMsg.includes('not found') || errMsg.includes('longer available')) {
+              console.warn('Model ' + m + ' not available, falling back...', errMsg);
+              lastErr = { code: 'api_error', status: resp.status, detail: errMsg };
+              continue;
             }
-          })
-        });
-      } catch (netErr) {
-        console.error('Network error:', netErr);
-        throw { code: 'network', detail: netErr.message || String(netErr) };
-      }
-      if (resp.status === 401 || resp.status === 403) {
-        const errBody = await resp.json().catch(() => ({}));
-        throw { code: 'bad_key', detail: (errBody.error && errBody.error.message) || resp.statusText };
-      }
-      if (resp.status === 429) throw { code: 'rate_limited' };
-      if (!resp.ok) {
-        const errBody = await resp.json().catch(() => ({}));
-        console.error('Gemini API error:', resp.status, errBody);
-        const errMsg = (errBody && errBody.error && errBody.error.message) || resp.statusText;
-        if (errBody && errBody.error && (errBody.error.status === 'INVALID_ARGUMENT' || errMsg.includes('API key'))) {
-          throw { code: 'bad_key', detail: errMsg };
+            throw { code: 'api_error', status: resp.status, detail: errMsg };
+          }
+
+          const d = await resp.json();
+          const raw = (
+            d.candidates &&
+            d.candidates[0] &&
+            d.candidates[0].content &&
+            d.candidates[0].content.parts &&
+            d.candidates[0].content.parts[0] &&
+            d.candidates[0].content.parts[0].text
+          ) || '';
+          if (!raw) continue;
+
+          const jsonStart = raw.indexOf('{');
+          const jsonEnd = raw.lastIndexOf('}');
+          if (jsonStart === -1 || jsonEnd === -1) continue;
+          return norm(JSON.parse(raw.slice(jsonStart, jsonEnd + 1)));
+        } catch (netErr) {
+          if (netErr.code) throw netErr;
+          throw { code: 'network', detail: netErr.message || String(netErr) };
         }
-        throw { code: 'api_error', status: resp.status, detail: errMsg };
       }
-      const d = await resp.json();
-      const raw = (
-        d.candidates &&
-        d.candidates[0] &&
-        d.candidates[0].content &&
-        d.candidates[0].content.parts &&
-        d.candidates[0].content.parts[0] &&
-        d.candidates[0].content.parts[0].text
-      ) || '';
-      if (!raw) {
-        const blockReason = d.candidates && d.candidates[0] && (d.candidates[0].finishReason || JSON.stringify(d.promptFeedback));
-        console.error('Empty Gemini response:', d);
-        throw { code: 'empty', detail: blockReason || 'لم يرجع نموذج الذكاء الاصطناعي أي نص' };
-      }
-      const jsonStart = raw.indexOf('{');
-      const jsonEnd = raw.lastIndexOf('}');
-      if (jsonStart === -1 || jsonEnd === -1) {
-        console.error('No JSON in response:', raw);
-        throw { code: 'parse', detail: raw.slice(0, 100) };
-      }
-      try {
-        return norm(JSON.parse(raw.slice(jsonStart, jsonEnd + 1)));
-      } catch (parseErr) {
-        console.error('JSON parse failed:', raw, parseErr);
-        throw { code: 'parse', detail: parseErr.message };
-      }
+
+      throw lastErr || { code: 'api_error', detail: 'تعذر الوصول إلى نماذج Gemini المتاحة لمفتاحك.' };
     }
 
     /* ---------- السجل ---------- */
