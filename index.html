@@ -523,7 +523,15 @@
         const entry = { t: Date.now(), sel: sel.map(s => ({ ...s })), note, r };
         log.unshift(entry); store(); renderLog(); show(entry); say('');
       } catch (e) {
-        say(e && e.code === 'bad_key' ? 'مفتاح API غير صحيح. راجع الإعدادات أسفل الصفحة.' : e && e.code === 'rate_limited' ? 'طلبات كثيرة. انتظر قليلاً ثم أعد المحاولة.' : 'تعذّر التحليل. أعد المحاولة.', 1);
+        const msg = !e ? 'تعذّر التحليل.' :
+          e.code === 'bad_key'     ? 'مفتاح API غير صحيح أو منتهي الصلاحية. احذفه وأضف مفتاحاً جديداً.' :
+          e.code === 'rate_limited'? 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.' :
+          e.code === 'network'     ? 'خطأ في الشبكة. تأكد من اتصالك بالإنترنت ثم أعد المحاولة.' :
+          e.code === 'parse'       ? 'خطأ في قراءة رد Gemini. أعد المحاولة.' :
+          e.code === 'empty'       ? 'Gemini لم يرد. أعد المحاولة.' :
+                                     'تعذّر التحليل. أعد المحاولة.';
+        console.error('Analysis error:', e);
+        say(msg, 1);
       }
       $('go').disabled = false;
     };
@@ -592,12 +600,52 @@
 أعد JSON فقط، بلا أي نص آخر وبلا علامات تنسيق، بهذا الهيكل بالضبط:
 {"classification":{"emotion":"","type":"أساسي أو مركب","intensity":"","opposite":""},"signal_decoded":"","facts_vs_assumptions":{"facts":[],"assumptions":[]},"action_plan":["","",""]}
 القواعد: عربية فصحى مبسطة ودافئة. type إما "أساسي" وإما "مركب" (إذا اخترت شعورين فاذكر اسم المركّب الناتج إن وُجد). intensity من درجات الشدة في العجلة. opposite هو الشعور المقابل. signal_decoded فقرة قصيرة عمّا يحاول الشعور التنبيه إليه. الحقائق: ما يمكن ملاحظته أو إثباته من النص فقط. الافتراضات: التفسيرات والتوقعات غير المؤكدة. action_plan: ثلاث خطوات صغيرة قابلة للتنفيذ اليوم. لست معالجاً نفسياً؛ وإن ظهر في النص خطر على حياة الكاتب فاجعل الخطوة الأولى طلب مساعدة عاجلة من شخص موثوق أو جهة مختصة.`;
-      const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + key;
-      const resp = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.4, maxOutputTokens: 1200 } }) });
-      if (resp.status === 400 || resp.status === 403) throw { code: 'bad_key' }; if (resp.status === 429) throw { code: 'rate_limited' }; if (!resp.ok) throw new Error('http');
+      let resp;
+      try {
+        const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + key;
+        resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.4,
+              maxOutputTokens: 1500,
+              responseMimeType: "application/json"
+            }
+          })
+        });
+      } catch (netErr) {
+        console.error('Network error:', netErr);
+        throw { code: 'network' };
+      }
+      if (resp.status === 401 || resp.status === 403) throw { code: 'bad_key' };
+      if (resp.status === 429) throw { code: 'rate_limited' };
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        console.error('Gemini API error:', resp.status, errBody);
+        if (errBody && errBody.error && errBody.error.status === 'INVALID_ARGUMENT') throw { code: 'bad_key' };
+        throw { code: 'api_error', status: resp.status };
+      }
       const d = await resp.json();
-      const raw = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts && d.candidates[0].content.parts[0] && d.candidates[0].content.parts[0].text) || '';
-      return norm(JSON.parse(raw.replace(/```json|```/g, '').trim()));
+      const raw = (
+        d.candidates &&
+        d.candidates[0] &&
+        d.candidates[0].content &&
+        d.candidates[0].content.parts &&
+        d.candidates[0].content.parts[0] &&
+        d.candidates[0].content.parts[0].text
+      ) || '';
+      if (!raw) { console.error('Empty Gemini response:', d); throw { code: 'empty' }; }
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      if (jsonStart === -1 || jsonEnd === -1) { console.error('No JSON in response:', raw); throw { code: 'parse' }; }
+      try {
+        return norm(JSON.parse(raw.slice(jsonStart, jsonEnd + 1)));
+      } catch (parseErr) {
+        console.error('JSON parse failed:', raw, parseErr);
+        throw { code: 'parse' };
+      }
     }
 
     /* ---------- السجل ---------- */
