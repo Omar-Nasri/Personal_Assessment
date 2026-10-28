@@ -424,6 +424,7 @@
       <input id="key" class="k" type="password" dir="ltr" placeholder="AIzaSy..." autocomplete="off">
       <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:6px;">
         <button id="savek" class="go" type="button" style="width:auto; padding:10px 24px; margin:0;">💾 حفظ المفتاح</button>
+        <button id="testk" class="sm" type="button" style="font-weight:bold; border-color:var(--accent); color:var(--accent);">⚡ فحص الاتصال بالمفتاح</button>
         <button id="delk" class="sm" type="button">🗑️ حذف المفتاح</button>
       </div>
       <p id="kst" class="hint" style="text-align:start; margin-top:10px;"></p>
@@ -523,14 +524,15 @@
         const entry = { t: Date.now(), sel: sel.map(s => ({ ...s })), note, r };
         log.unshift(entry); store(); renderLog(); show(entry); say('');
       } catch (e) {
-        const msg = !e ? 'تعذّر التحليل.' :
-          e.code === 'bad_key'     ? 'مفتاح API غير صحيح أو منتهي الصلاحية. احذفه وأضف مفتاحاً جديداً.' :
-          e.code === 'rate_limited'? 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.' :
-          e.code === 'network'     ? 'خطأ في الشبكة. تأكد من اتصالك بالإنترنت ثم أعد المحاولة.' :
-          e.code === 'parse'       ? 'خطأ في قراءة رد Gemini. أعد المحاولة.' :
-          e.code === 'empty'       ? 'Gemini لم يرد. أعد المحاولة.' :
-                                     'تعذّر التحليل. أعد المحاولة.';
         console.error('Analysis error:', e);
+        let detail = e ? (e.message || e.code || JSON.stringify(e)) : 'غير معروف';
+        let msg = 'تعذّر التحليل: ' + detail;
+        if (e && e.code === 'bad_key') msg = 'مفتاح API غير صحيح أو منتهي الصلاحية (' + (e.detail || '') + '). تأكد من تفعيل Gemini API في Google AI Studio.';
+        else if (e && e.code === 'network') msg = 'خطأ في الاتصال بالإنترنت أو حظر أمني من المتصفح (CORS / Network): ' + (e.detail || '');
+        else if (e && e.code === 'rate_limited') msg = 'طلبات كثيرة (Rate Limit). انتظر دقيقة ثم حاول مجدداً.';
+        else if (e && e.code === 'api_error') msg = 'خطأ من خدمة Google Gemini (' + (e.status || '') + '): ' + (e.detail || '');
+        else if (e && e.code === 'empty') msg = 'لم يُرجع الذكاء الاصطناعي أي رد (' + (e.detail || '') + ').';
+        else if (e && e.code === 'parse') msg = 'تعذر معالجة الرد بتنسيق JSON: ' + (e.detail || '');
         say(msg, 1);
       }
       $('go').disabled = false;
@@ -591,6 +593,28 @@
     const kst = () => { $('kst').textContent = getKey() ? 'مفتاح Gemini محفوظ: التحليل بالذكاء الاصطناعي مفعّل.' : 'لا يوجد مفتاح: التحليل داخلي وبدون إنترنت.' };
     $('savek').onclick = () => { const v = $('key').value.trim(); if (v) { try { localStorage.setItem(KK, v) } catch (e) { } $('key').value = ''; kst() } };
     $('delk').onclick = () => { try { localStorage.removeItem(KK) } catch (e) { } kst() };
+    $('testk').onclick = async () => {
+      const k = getKey() || $('key').value.trim();
+      const st = $('kst');
+      if (!k) { st.textContent = '❌ الرجاء إدخال المفتاح أولاً.'; return; }
+      st.textContent = '⏳ جاري فحص المفتاح مع Google Gemini...';
+      try {
+        const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + k, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: 'قل كلمة: نجاح' }] }] })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail = (data.error && data.error.message) || res.statusText || ('كود الخطأ: ' + res.status);
+          st.textContent = '❌ فشل الفحص: ' + detail;
+        } else {
+          st.textContent = '✅ الاتصال ناجح ومفتاح Gemini يعمل بكفاءة!';
+        }
+      } catch (err) {
+        st.textContent = '❌ فشل الاتصال بالشبكة (Network / CORS): ' + (err.message || err);
+      }
+    };
     async function askAI(key, desc, note) {
       const prompt = `أنت مرشد وجداني يعتمد نموذج عجلة بلوتشيك للمشاعر. حلّل الحالة التالية.
 المشاعر المختارة: ${desc}
@@ -617,15 +641,21 @@
         });
       } catch (netErr) {
         console.error('Network error:', netErr);
-        throw { code: 'network' };
+        throw { code: 'network', detail: netErr.message || String(netErr) };
       }
-      if (resp.status === 401 || resp.status === 403) throw { code: 'bad_key' };
+      if (resp.status === 401 || resp.status === 403) {
+        const errBody = await resp.json().catch(() => ({}));
+        throw { code: 'bad_key', detail: (errBody.error && errBody.error.message) || resp.statusText };
+      }
       if (resp.status === 429) throw { code: 'rate_limited' };
       if (!resp.ok) {
         const errBody = await resp.json().catch(() => ({}));
         console.error('Gemini API error:', resp.status, errBody);
-        if (errBody && errBody.error && errBody.error.status === 'INVALID_ARGUMENT') throw { code: 'bad_key' };
-        throw { code: 'api_error', status: resp.status };
+        const errMsg = (errBody && errBody.error && errBody.error.message) || resp.statusText;
+        if (errBody && errBody.error && (errBody.error.status === 'INVALID_ARGUMENT' || errMsg.includes('API key'))) {
+          throw { code: 'bad_key', detail: errMsg };
+        }
+        throw { code: 'api_error', status: resp.status, detail: errMsg };
       }
       const d = await resp.json();
       const raw = (
@@ -636,15 +666,22 @@
         d.candidates[0].content.parts[0] &&
         d.candidates[0].content.parts[0].text
       ) || '';
-      if (!raw) { console.error('Empty Gemini response:', d); throw { code: 'empty' }; }
+      if (!raw) {
+        const blockReason = d.candidates && d.candidates[0] && (d.candidates[0].finishReason || JSON.stringify(d.promptFeedback));
+        console.error('Empty Gemini response:', d);
+        throw { code: 'empty', detail: blockReason || 'لم يرجع نموذج الذكاء الاصطناعي أي نص' };
+      }
       const jsonStart = raw.indexOf('{');
       const jsonEnd = raw.lastIndexOf('}');
-      if (jsonStart === -1 || jsonEnd === -1) { console.error('No JSON in response:', raw); throw { code: 'parse' }; }
+      if (jsonStart === -1 || jsonEnd === -1) {
+        console.error('No JSON in response:', raw);
+        throw { code: 'parse', detail: raw.slice(0, 100) };
+      }
       try {
         return norm(JSON.parse(raw.slice(jsonStart, jsonEnd + 1)));
       } catch (parseErr) {
         console.error('JSON parse failed:', raw, parseErr);
-        throw { code: 'parse' };
+        throw { code: 'parse', detail: parseErr.message };
       }
     }
 
@@ -671,7 +708,15 @@
       log = []; store(); renderLog(); arm = 0; $('clr').textContent = 'مسح السجل';
     };
     paint(); renderLog(); kst();
-    if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => { }));
+    // Unregister any active service worker to prevent aggressive caching
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        for (let reg of regs) reg.unregister();
+      });
+      caches.keys().then(keys => {
+        for (let k of keys) caches.delete(k);
+      });
+    }
   </script>
 </body>
 
